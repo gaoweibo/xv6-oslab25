@@ -164,7 +164,8 @@ UPROGS=\
 	$U/_zombie\
 	$U/_waittest\
 	$U/_exittest\
-
+	$U/_trace\
+	$U/_sysinfotest\
 
 ifeq ($(LAB),trap)
 UPROGS += \

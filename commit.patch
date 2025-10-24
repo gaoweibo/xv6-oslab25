@@ -1,0 +1,1311 @@
+diff --git a/Makefile b/Makefile
+index 323d089..2721223 100644
+--- a/Makefile
++++ b/Makefile
+@@ -70,13 +70,18 @@ OBJCOPY = $(TOOLPREFIX)objcopy
+ OBJDUMP = $(TOOLPREFIX)objdump
+ GDB = $(TOOLPREFIX)gdb
+ 
+-CFLAGS = -Wall -Werror -O -fno-omit-frame-pointer -ggdb -DTEST
++CFLAGS = -Wall -Werror -O -fno-omit-frame-pointer -ggdb
++
++ifdef LAB_SYSCALL_TEST
++CFLAGS += -DLAB_SYSCALL_TEST
++endif
+ 
+ GCC_VER12 := $(shell expr `$(CC) -dumpfullversion -dumpversion | sed -e 's/\.\([0-9][0-9]\)/\1/g' -e 's/\.\([0-9]\)/0\1/g' -e 's/^[0-9]\{3,4\}$$/&00/'` \>= 120000)
+ ifeq "$(GCC_VER12)" "1"
+ CFLAGS += -Wno-error=infinite-recursion
+ endif
+ 
++
+ ifdef LAB
+ LABUPPER = $(shell echo $(LAB) | tr a-z A-Z)
+ CFLAGS += -DSOL_$(LABUPPER)
+@@ -157,12 +162,9 @@ UPROGS=\
+ 	$U/_grind\
+ 	$U/_wc\
+ 	$U/_zombie\
++	$U/_waittest\
++	$U/_exittest\
+ 
+-ifeq ($(LAB),syscall)
+-UPROGS += \
+-	$U/_trace\
+-	$U/_sysinfotest
+-endif
+ 
+ ifeq ($(LAB),trap)
+ UPROGS += \
+@@ -249,7 +251,7 @@ GDBARGS += -ex 'set riscv use-compressed-breakpoints yes'
+ 
+ 
+ gdb: 
+-	$(GDB) $(GDBARGS)
++	$(GDB)
+ 
+ ##
+ ##  FOR testing lab grading script
+@@ -266,7 +268,13 @@ grade:
+ 	@echo $(MAKE) clean
+ 	@$(MAKE) clean || \
+           (echo "'make clean' failed.  HINT: Do you have another running instance of xv6?" && exit 1)
+-	./grade-lab-$(LAB) $(GRADEFLAGS)
++	./grade-lab-$(LAB) $(GRADEFLAGS) --toolprefix $(TOOLPREFIX)
++
++format:
++	python3 clang-format.py
++
++diff:
++	git diff origin/syscall HEAD > commit.patch
+ 
+ format:
+ 	python3 clang-format.py
+diff --git a/conf/lab.mk b/conf/lab.mk
+index 05e8b8d..278d1a8 100644
+--- a/conf/lab.mk
++++ b/conf/lab.mk
+@@ -1 +1 @@
+-LAB=util
++LAB=syscall
+diff --git a/grade-lab-syscall b/grade-lab-syscall
+new file mode 100755
+index 0000000..61c7ba4
+--- /dev/null
++++ b/grade-lab-syscall
+@@ -0,0 +1,65 @@
++#!/usr/bin/env python
++
++import re
++import subprocess
++from gradelib import *
++
++r = Runner(save("xv6.out"))
++
++import re
++from gradelib import *
++
++r = Runner(save("xv6.out"))
++
++@test(5, "trace 32 grep")
++def test_trace_32_grep():
++    r.run_qemu(shell_script([
++        'trace 32 grep hello README'
++    ]))
++    r.match('^\\d+: sys_read\\(3\\) -> 1023')
++    r.match('^\\d+: sys_read\\(3\\) -> 966')
++    r.match('^\\d+: sys_read\\(3\\) -> 0')
++
++@test(5, "trace all grep")
++def test_trace_all_grep():
++    r.run_qemu(shell_script([
++        'trace 2147483647 grep hello README'
++    ]))
++    r.match('^\\d+: sys_trace\\(2147483647\\) -> 0')
++    r.match('^\\d+: sys_exec\\(12240\\) -> 3')
++    r.match('^\\d+: sys_open\\(12240\\) -> 3')
++    r.match('^\\d+: sys_read\\(3\\) -> 1023')
++    r.match('^\\d+: sys_read\\(3\\) -> 966')
++    r.match('^\\d+: sys_read\\(3\\) -> 0')
++    r.match('^\\d+: sys_close\\(3\\) -> 0')
++
++@test(5, "trace nothing")
++def test_trace_nothing():
++    r.run_qemu(shell_script([
++        'grep hello README'
++    ]))
++    r.match(no=[".* syscall .*"])
++
++@test(5, "trace children")
++def test_trace_children():
++    r.run_qemu(shell_script([
++        'trace 2 usertests forkforkfork'
++    ]))
++    r.match('3: sys_fork\\([-\\+]?\\d+\\) -> 4')
++    r.match('^5: sys_fork\\([-\\+]?\\d+\\) -> \\d+')
++    r.match('^6: sys_fork\\([-\\+]?\\d+\\) -> \\d+')
++    r.match('^\\d+: sys_fork\\([-\\+]?\\d+\\) -> -1')
++    r.match('^ALL TESTS PASSED')
++
++@test(14, "sysinfotest")
++def test_sysinfotest():
++    r.run_qemu(shell_script([
++        'sysinfotest'
++    ]))
++    r.match('^sysinfotest: OK', no=[".* FAIL .*"])
++
++
++run_tests()
++
++
++
+diff --git a/grade-lab-util b/grade-lab-util
+deleted file mode 100755
+index e5f36a6..0000000
+--- a/grade-lab-util
++++ /dev/null
+@@ -1,171 +0,0 @@
+-#!/usr/bin/python3
+-
+-import re
+-from gradelib import *
+-
+-r = Runner(save("xv6.out"))
+-
+-@test(5, "sleep, no arguments")
+-def test_sleep_no_args():
+-    r.run_qemu(shell_script([
+-        'sleep'
+-    ]))
+-    r.match(no=["exec .* failed", "$ sleep\n$"])
+-
+-@test(5, "sleep, returns")
+-def test_sleep_no_args():
+-    r.run_qemu(shell_script([
+-        'sleep',
+-        'echo OK'
+-    ]))
+-    r.match('^OK$', no=["exec .* failed", "$ sleep\n$"])
+-
+-@test(10, "sleep, makes syscall")
+-def test_sleep():
+-    r.run_qemu(shell_script([
+-        'sleep 10',
+-        'echo FAIL'
+-    ]), stop_breakpoint('sys_sleep'))
+-    r.match('\\$ sleep 10', no=['FAIL'])
+-
+-@test(10, "pingpong lenient testing")
+-def test_pingpong():
+-    r.run_qemu(shell_script([
+-        'pingpong', 'echo OK'
+-    ]))
+-    r.match('^\\d+: received ping from pid \\d+$', '^\\d+: received pong from pid \\d+$', '^OK$')
+-
+-@test(10, "pingpong strict testing with changing pids")
+-def test_pingpong_strict_pid_change():
+-    def strict_match(line):
+-        """Regular expression to match ping/pong lines and capture process IDs"""
+-        match_ping = re.match(r'^(\d+): received ping from pid (\d+)$', line)
+-        match_pong = re.match(r'^(\d+): received pong from pid (\d+)$', line)
+-        
+-        if match_ping:
+-            pid1, pid2 = match_ping.groups()
+-            return (int(pid1), int(pid2))  # Return the captured process IDs
+-            
+-        elif match_pong:
+-            pid1, pid2 = match_pong.groups()
+-            return (int(pid1), int(pid2))  # Return the captured process IDs
+-        
+-        return None
+-
+-    # Run QEMU and execute pingpong three times
+-    r.run_qemu(shell_script([
+-        'pingpong', 'pingpong', 'pingpong', 'echo OK'
+-    ]))
+-
+-    # Clean the output, remove ANSI color codes, and filter valid lines
+-    clean_lines = []
+-    for line in r.qemu.output.splitlines():
+-        line = re.sub(r'\x1b\[[0-9;]*m', '', line)  # Remove color codes
+-        if re.match(r'^\d+: received (ping|pong) from pid \d+$', line) or re.match(r'^OK$', line):
+-            clean_lines.append(line)
+-
+-    # Initialize variables to store previous process IDs
+-    prev_ping_pid = None
+-    prev_pong_pid = None
+-
+-    # Iterate through each run, two lines per run
+-    for i in range(0, len(clean_lines) - 2, 2):
+-        # Get the ping and pong lines
+-        ping_match = strict_match(clean_lines[i])
+-        pong_match = strict_match(clean_lines[i+1])
+-
+-        # Check if the format matches
+-        assert ping_match and pong_match, "Ping/Pong output format mismatch"
+-        
+-        # Get the process IDs for the current run
+-        ping_pid, pong_pid = ping_match[0], ping_match[1]
+-
+-        # Check if the process IDs match
+-        assert ping_pid == pong_match[1], f"PID mismatch: {ping_pid} != {pong_match[1]}"
+-        assert pong_pid == pong_match[0], f"PID mismatch: {pong_pid} != {pong_match[0]}"
+-
+-        # Check if the process IDs are different from the previous run
+-        if prev_ping_pid is not None and prev_pong_pid is not None:
+-            assert ping_pid != prev_ping_pid and pong_pid != prev_pong_pid, \
+-                "Process IDs did not change between runs"
+-
+-        # Store the current process IDs for comparison in the next run
+-        prev_ping_pid, prev_pong_pid = ping_pid, pong_pid
+-
+-    # Finally, match the echo OK output
+-    assert clean_lines[-1] == 'OK', "Final OK message missing"
+-
+-@test(5, "find, in current directory and create a file")
+-def test_find_file_curdir():
+-    fn = random_str()
+-    r.run_qemu(shell_script([
+-        'echo > %s' % fn,
+-        'find . %s' % fn
+-    ]))
+-    r.match('./%s' % fn)
+-
+-@test(5, "find, in current directory and create a dir")
+-def test_find_dir_curdir():
+-    fn = random_str()
+-    r.run_qemu(shell_script([
+-        'mkdir %s' % fn,
+-        'find . %s' % fn
+-    ]))
+-    r.match('./%s' % fn)
+-
+-@test(5, "find, find file recursive")
+-def test_find_file_recursive():
+-    needle = random_str()
+-    dirs = [random_str() for _ in range(3)]
+-    r.run_qemu(shell_script([
+-        'mkdir %s' % dirs[0],
+-        'echo > %s/%s' % (dirs[0], needle),
+-        'mkdir %s/%s' % (dirs[0], dirs[1]),
+-        'echo > %s/%s/%s' % (dirs[0], dirs[1], needle),
+-        'mkdir %s' % dirs[2],
+-        'echo > %s/%s' % (dirs[2], needle),
+-        'find . %s' % needle
+-    ]))
+-    r.match('./%s/%s' % (dirs[0], needle),
+-            './%s/%s/%s' % (dirs[0], dirs[1], needle),
+-            './%s/%s' % (dirs[2], needle))
+-    
+-@test(5, "find, find dir recursive with no duplicates")
+-def test_find_recursive_no_duplicates():
+-    needle = random_str()
+-    dirs = [random_str() for _ in range(3)]
+-    
+-    r.run_qemu(shell_script([
+-        'mkdir %s' % dirs[0],
+-        'echo > %s/%s' % (dirs[0], needle),
+-        'mkdir %s/%s' % (dirs[0], dirs[1]),
+-        'mkdir %s/%s/%s' % (dirs[0], dirs[1], needle),
+-        'mkdir %s' % dirs[2],
+-        'echo > %s/%s' % (dirs[2], needle),
+-        'find . %s' % needle
+-    ]))
+-
+-    expected_lines = [
+-        './%s/%s' % (dirs[0], needle),
+-        './%s/%s/%s' % (dirs[0], dirs[1], needle),
+-        './%s/%s' % (dirs[2], needle)
+-    ]
+-
+-    output_lines = r.qemu.output.splitlines()
+-
+-    clean_lines = []
+-    for line in output_lines:
+-        line = re.sub(r'\x1b\[[0-9;]*m', '', line)  
+-        if re.match(r'^\./.*$', line):  
+-            clean_lines.append(line)
+-
+-    unique_clean_lines = list(set(clean_lines))
+-
+-    for expected in expected_lines:
+-        assert expected in unique_clean_lines, "Expected path '%s' not found in output" % expected
+-
+-    assert len(clean_lines) == len(expected_lines), \
+-        "Expected %d unique lines, but found %d" % (len(expected_lines), len(unique_clean_lines))
+-
+-
+-run_tests()
+diff --git a/gradelib.py b/gradelib.py
+index 4a94595..528d887 100644
+--- a/gradelib.py
++++ b/gradelib.py
+@@ -30,7 +30,7 @@ def test(points, title=None, parent=None):
+         if parent:
+             title = "  " + title
+ 
+-        def run_test():
++        def run_test(options):
+             global TOTAL, POSSIBLE, CURRENT_TEST
+ 
+             # Handle test dependencies
+@@ -52,6 +52,7 @@ def test(points, title=None, parent=None):
+             try:
+                 if parent_failed:
+                     raise AssertionError('Parent failed: %s' % parent.__name__)
++                run_test.options = options
+                 fn()
+             except AssertionError as e:
+                 fail = str(e)
+@@ -105,6 +106,7 @@ def run_tests():
+                       help="print commands")
+     parser.add_option("--color", choices=["never", "always", "auto"],
+                       default="auto", help="never, always, or auto")
++    parser.add_option("--toolprefix", default="riscv64-unknown-elf-")
+     (options, args) = parser.parse_args()
+ 
+     # Start with a full build to catch build errors
+@@ -118,7 +120,7 @@ def run_tests():
+     try:
+         for test in TESTS:
+             if not limit or any(l in test.title.lower() for l in limit):
+-                test()
++                test(options=options)
+         if not limit:
+             print("Score: %d/%d" % (TOTAL, POSSIBLE))
+     except KeyboardInterrupt:
+diff --git a/kernel/defs.h b/kernel/defs.h
+index a1a5325..3323e7b 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -90,6 +90,10 @@ void            _printf(const char*, unsigned int, char*, ... );
+ #define printf(...) _printf(__VA_ARGS__)
+ void            _printf(char*, ... );
+ #endif
++
++#define exit_info(...) info_with_color(__VA_ARGS__)
++void            info_with_color(char*, ... );
++
+ void            panic(char*) __attribute__((noreturn));
+ void            printfinit(void);
+ 
+diff --git a/kernel/printf.c b/kernel/printf.c
+index 0090a2b..be48928 100644
+--- a/kernel/printf.c
++++ b/kernel/printf.c
+@@ -52,6 +52,72 @@ static void printptr(uint64 x) {
+   for (i = 0; i < (sizeof(uint64) * 2); i++, x <<= 4) consputc(digits[x >> (sizeof(uint64) * 8 - 4)]);
+ }
+ 
++void info_with_color(char *fmt, ...) {
++  va_list ap;
++  int i, c, locking;
++  char *s;
++#ifndef LAB_SYSCALL_TEST
++  static const char *color = "\033[0;36m";
++  static const char *info = "[INFO] ";
++  static const char *rst_str = "\033[0m";
++#endif
++
++  locking = pr.locking;
++  if (locking) acquire(&pr.lock);
++
++  if (fmt == 0) panic("null fmt");
++
++#ifndef LAB_SYSCALL_TEST
++  for (i = 0; color[i] != 0; i++) {
++    consputc(color[i]);
++  }
++  for (i = 0; info[i] != 0; i++) {
++    consputc(info[i]);
++  }
++#endif
++
++  va_start(ap, fmt);
++  for (i = 0; (c = fmt[i] & 0xff) != 0; i++) {
++    if (c != '%') {
++      consputc(c);
++      continue;
++    }
++    c = fmt[++i] & 0xff;
++    if (c == 0) break;
++    switch (c) {
++      case 'd':
++        printint(va_arg(ap, int), 10, 1);
++        break;
++      case 'x':
++        printint(va_arg(ap, int), 16, 1);
++        break;
++      case 'p':
++        printptr(va_arg(ap, uint64));
++        break;
++      case 's':
++        if ((s = va_arg(ap, char *)) == 0) s = "(null)";
++        for (; *s; s++) consputc(*s);
++        break;
++      case '%':
++        consputc('%');
++        break;
++      default:
++        // Print unknown % sequence to draw attention.
++        consputc('%');
++        consputc(c);
++        break;
++    }
++  }
++
++#ifndef LAB_SYSCALL_TEST
++  for (i = 0; rst_str[i] != 0; i++) {
++    consputc(rst_str[i]);
++  }
++#endif
++
++  if (locking) release(&pr.lock);
++}
++
+ // Print to the console. only understands %d, %x, %p, %s.
+ void
+ #ifdef TEST
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index c955a0b..dd6b28d 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -88,6 +88,7 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_wait(void);
+ extern uint64 sys_write(void);
+ extern uint64 sys_uptime(void);
++extern uint64 sys_rename(void);
+ 
+ static uint64 (*syscalls[])(void) = {
+     [SYS_fork] = sys_fork,   [SYS_exit] = sys_exit,     [SYS_wait] = sys_wait,     [SYS_pipe] = sys_pipe,
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index 33d0377..653d8de 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -22,3 +22,4 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_rename 22
+diff --git a/kernel/sysinfo.h b/kernel/sysinfo.h
+new file mode 100644
+index 0000000..fb878e6
+--- /dev/null
++++ b/kernel/sysinfo.h
+@@ -0,0 +1,4 @@
++struct sysinfo {
++  uint64 freemem;   // amount of free memory (bytes)
++  uint64 nproc;     // number of process
++};
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 97219f6..a69071e 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -69,3 +69,15 @@ uint64 sys_uptime(void) {
+   release(&tickslock);
+   return xticks;
+ }
++
++uint64 sys_rename(void) {
++  char name[16];
++  int len = argstr(0, name, MAXPATH);
++  if (len < 0) {
++    return -1;
++  }
++  struct proc *p = myproc();
++  memmove(p->name, name, len);
++  p->name[len] = '\0';
++  return 0;
++}
+diff --git a/user/exittest.c b/user/exittest.c
+new file mode 100644
+index 0000000..f1f820e
+--- /dev/null
++++ b/user/exittest.c
+@@ -0,0 +1,32 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++const int nonblock = 1;
++
++void exittest(void) {
++  printf("exit test\n");
++
++  for (int i = 0; i < 3; i++) {
++    int pid = fork();
++    if (pid == 0) {
++      // 给每个子进程起一个不同的名字
++      char name[16] = "child";
++      char idx = '0' + i;
++      int len = strlen(name);
++      memmove(name + len, &idx, 1);
++      name[len + 1] = '\0';
++      rename(name);
++      // 让子进程睡眠，使得父进程退出时子进程还活着
++      sleep(10);
++      exit(0);
++    }
++  }
++
++  sleep(1);
++}
++
++int main(int argc, char *argv[]) {
++  exittest();
++  exit(0);
++}
+\ No newline at end of file
+diff --git a/user/forktest.c b/user/forktest.c
+index 1df49fc..8e440a4 100644
+--- a/user/forktest.c
++++ b/user/forktest.c
+@@ -26,13 +26,13 @@ void forktest(void) {
+   }
+ 
+   for (; n > 0; n--) {
+-    if (wait(0) < 0) {
++    if (wait(0, 0) < 0) {
+       print("wait stopped early\n");
+       exit(1);
+     }
+   }
+ 
+-  if (wait(0) != -1) {
++  if (wait(0, 0) != -1) {
+     print("wait got too many\n");
+     exit(1);
+   }
+diff --git a/user/grind.c b/user/grind.c
+index 654421b..5c9a468 100644
+--- a/user/grind.c
++++ b/user/grind.c
+@@ -102,7 +102,7 @@ void go(int which_child) {
+         printf("grind: fork failed\n");
+         exit(1);
+       }
+-      wait(0);
++      wait(0, 0);
+     } else if (what == 14) {
+       int pid = fork();
+       if (pid == 0) {
+@@ -113,7 +113,7 @@ void go(int which_child) {
+         printf("grind: fork failed\n");
+         exit(1);
+       }
+-      wait(0);
++      wait(0, 0);
+     } else if (what == 15) {
+       sbrk(6011);
+     } else if (what == 16) {
+@@ -132,7 +132,7 @@ void go(int which_child) {
+         exit(1);
+       }
+       kill(pid);
+-      wait(0);
++      wait(0, 0);
+     } else if (what == 18) {
+       int pid = fork();
+       if (pid == 0) {
+@@ -142,7 +142,7 @@ void go(int which_child) {
+         printf("grind: fork failed\n");
+         exit(1);
+       }
+-      wait(0);
++      wait(0, 0);
+     } else if (what == 19) {
+       int fds[2];
+       if (pipe(fds) < 0) {
+@@ -163,7 +163,7 @@ void go(int which_child) {
+       }
+       close(fds[0]);
+       close(fds[1]);
+-      wait(0);
++      wait(0, 0);
+     } else if (what == 20) {
+       int pid = fork();
+       if (pid == 0) {
+@@ -178,7 +178,7 @@ void go(int which_child) {
+         printf("fork failed\n");
+         exit(1);
+       }
+-      wait(0);
++      wait(0, 0);
+     } else if (what == 21) {
+       unlink("c");
+       // should always succeed. check that there are free i-nodes,
+@@ -269,8 +269,8 @@ void go(int which_child) {
+       read(bb[0], buf + 1, 1);
+       close(bb[0]);
+       int st1, st2;
+-      wait(&st1);
+-      wait(&st2);
++      wait(&st1, 0);
++      wait(&st2, 0);
+       if (st1 != 0 || st2 != 0 || strcmp(buf, "hi") != 0) {
+         printf("exec pipeline failed %d %d \"%s\"\n", st1, st2, buf);
+         exit(1);
+@@ -306,13 +306,13 @@ void iter() {
+   }
+ 
+   int st1 = -1;
+-  wait(&st1);
++  wait(&st1, 0);
+   if (st1 != 0) {
+     kill(pid1);
+     kill(pid2);
+   }
+   int st2 = -1;
+-  wait(&st2);
++  wait(&st2, 0);
+ 
+   exit(0);
+ }
+@@ -325,7 +325,7 @@ int main() {
+       exit(0);
+     }
+     if (pid > 0) {
+-      wait(0);
++      wait(0, 0);
+     }
+     sleep(20);
+   }
+diff --git a/user/init.c b/user/init.c
+index 9ca8790..353d54c 100644
+--- a/user/init.c
++++ b/user/init.c
+@@ -37,7 +37,7 @@ int main(void) {
+     for (;;) {
+       // this call to wait() returns if the shell exits,
+       // or if a parentless process exits.
+-      wpid = wait((int *)0);
++      wpid = wait((int *)0, 0);
+       if (wpid == pid) {
+         // the shell exited; restart it.
+         break;
+diff --git a/user/sh.c b/user/sh.c
+index 13c7d7c..c916df5 100644
+--- a/user/sh.c
++++ b/user/sh.c
+@@ -88,7 +88,7 @@ void runcmd(struct cmd *cmd) {
+     case LIST:
+       lcmd = (struct listcmd *)cmd;
+       if (fork1() == 0) runcmd(lcmd->left);
+-      wait(0);
++      wait(0, 0);
+       runcmd(lcmd->right);
+       break;
+ 
+@@ -111,8 +111,8 @@ void runcmd(struct cmd *cmd) {
+       }
+       close(p[0]);
+       close(p[1]);
+-      wait(0);
+-      wait(0);
++      wait(0, 0);
++      wait(0, 0);
+       break;
+ 
+     case BACK:
+@@ -153,7 +153,7 @@ int main(void) {
+       continue;
+     }
+     if (fork1() == 0) runcmd(parsecmd(buf));
+-    wait(0);
++    wait(0, 0);
+   }
+   exit(0);
+ }
+diff --git a/user/stressfs.c b/user/stressfs.c
+index d95efd0..43f1ee1 100644
+--- a/user/stressfs.c
++++ b/user/stressfs.c
+@@ -39,7 +39,7 @@ int main(int argc, char *argv[]) {
+   for (i = 0; i < 20; i++) read(fd, data, sizeof(data));
+   close(fd);
+ 
+-  wait(0);
++  wait(0, 0);
+ 
+   exit(0);
+ }
+diff --git a/user/sysinfotest.c b/user/sysinfotest.c
+new file mode 100644
+index 0000000..2e7c48a
+--- /dev/null
++++ b/user/sysinfotest.c
+@@ -0,0 +1,123 @@
++#include "kernel/types.h"
++#include "kernel/riscv.h"
++#include "kernel/sysinfo.h"
++#include "user/user.h"
++
++void sinfo(struct sysinfo *info) {
++  if (sysinfo(info) < 0) {
++    printf("FAIL: sysinfo failed");
++    exit(1);
++  }
++}
++
++//
++// use sbrk() to count how many free physical memory pages there are.
++//
++int countfree() {
++  uint64 sz0 = (uint64)sbrk(0);
++  struct sysinfo info;
++  int n = 0;
++
++  while (1) {
++    if ((uint64)sbrk(PGSIZE) == 0xffffffffffffffff) {
++      break;
++    }
++    n += PGSIZE;
++  }
++  sinfo(&info);
++  if (info.freemem != 0) {
++    printf("FAIL: there is no free mem, but sysinfo.freemem=%d\n", info.freemem);
++    exit(1);
++  }
++  sbrk(-((uint64)sbrk(0) - sz0));
++  return n;
++}
++
++void testmem() {
++  struct sysinfo info;
++  uint64 n = countfree();
++
++  sinfo(&info);
++
++  if (info.freemem != n) {
++    printf("FAIL: free mem %d (bytes) instead of %d\n", info.freemem, n);
++    exit(1);
++  }
++
++  if ((uint64)sbrk(PGSIZE) == 0xffffffffffffffff) {
++    printf("sbrk failed");
++    exit(1);
++  }
++
++  sinfo(&info);
++
++  if (info.freemem != n - PGSIZE) {
++    printf("FAIL: free mem %d (bytes) instead of %d\n", n - PGSIZE, info.freemem);
++    exit(1);
++  }
++
++  if ((uint64)sbrk(-PGSIZE) == 0xffffffffffffffff) {
++    printf("sbrk failed");
++    exit(1);
++  }
++
++  sinfo(&info);
++
++  if (info.freemem != n) {
++    printf("FAIL: free mem %d (bytes) instead of %d\n", n, info.freemem);
++    exit(1);
++  }
++}
++
++void testcall() {
++  struct sysinfo info;
++
++  if (sysinfo(&info) < 0) {
++    printf("FAIL: sysinfo failed\n");
++    exit(1);
++  }
++
++  if (sysinfo((struct sysinfo *)0xeaeb0b5b00002f5e) != 0xffffffffffffffff) {
++    printf("FAIL: sysinfo succeeded with bad argument\n");
++    exit(1);
++  }
++}
++
++void testproc() {
++  struct sysinfo info;
++  uint64 nproc;
++  int status;
++  int pid;
++
++  sinfo(&info);
++  nproc = info.nproc;
++
++  pid = fork();
++  if (pid < 0) {
++    printf("sysinfotest: fork failed\n");
++    exit(1);
++  }
++  if (pid == 0) {
++    sinfo(&info);
++    if (info.nproc != nproc - 1) {
++      printf("sysinfotest: FAIL nproc is %d instead of %d\n", info.nproc, nproc - 1);
++      exit(1);
++    }
++    exit(0);
++  }
++  wait(&status, 0);
++  sinfo(&info);
++  if (info.nproc != nproc) {
++    printf("sysinfotest: FAIL nproc is %d instead of %d\n", info.nproc, nproc);
++    exit(1);
++  }
++}
++
++int main(int argc, char *argv[]) {
++  printf("sysinfotest: start\n");
++  testcall();
++  testmem();
++  testproc();
++  printf("sysinfotest: OK\n");
++  exit(0);
++}
+diff --git a/user/trace.c b/user/trace.c
+new file mode 100644
+index 0000000..ab9701b
+--- /dev/null
++++ b/user/trace.c
+@@ -0,0 +1,25 @@
++#include "kernel/param.h"
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++int main(int argc, char *argv[]) {
++  int i;
++  char *nargv[MAXARG];
++
++  if (argc < 3 || (argv[1][0] < '0' || argv[1][0] > '9')) {
++    fprintf(2, "Usage: %s mask command\n", argv[0]);
++    exit(1);
++  }
++
++  if (trace(atoi(argv[1])) < 0) {
++    fprintf(2, "%s: trace failed\n", argv[0]);
++    exit(1);
++  }
++
++  for (i = 2; i < argc && i < MAXARG; i++) {
++    nargv[i - 2] = argv[i];
++  }
++  exec(nargv[0], nargv);
++  exit(0);
++}
+diff --git a/user/user.h b/user/user.h
+index 56eb5ce..9bb94ee 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -7,7 +7,7 @@ struct rtcdate;
+ // system calls
+ int fork(void);
+ int exit(int) __attribute__((noreturn));
+-int wait(int*);
++int wait(int*, int);
+ int pipe(int*);
+ int write(int, const void*, int);
+ int read(int, void*, int);
+@@ -26,6 +26,7 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int rename(const char*);
+ 
+ // ulib.c
+ int stat(const char*, struct stat*);
+diff --git a/user/usertests.c b/user/usertests.c
+index 7ff5793..8acd7a5 100644
+--- a/user/usertests.c
++++ b/user/usertests.c
+@@ -172,7 +172,7 @@ void copyinstr2(char *s) {
+   }
+ 
+   int st = 0;
+-  wait(&st);
++  wait(&st, 0);
+   if (st != 747) {
+     printf("exec(echo, BIG) succeeded, should have failed\n");
+     exit(1);
+@@ -344,7 +344,7 @@ void truncate3(char *s) {
+     close(fd);
+   }
+ 
+-  wait(&xstatus);
++  wait(&xstatus, 0);
+   unlink("truncfile");
+   exit(xstatus);
+ }
+@@ -393,7 +393,7 @@ void exitiputtest(char *s) {
+     }
+     exit(0);
+   }
+-  wait(&xstatus);
++  wait(&xstatus, 0);
+   exit(xstatus);
+ }
+ 
+@@ -433,7 +433,7 @@ void openiputtest(char *s) {
+     printf("%s: unlink failed\n", s);
+     exit(1);
+   }
+-  wait(&xstatus);
++  wait(&xstatus, 0);
+   exit(xstatus);
+ }
+ 
+@@ -618,7 +618,7 @@ void exectest(char *s) {
+     }
+     // won't get to here
+   }
+-  if (wait(&xstatus) != pid) {
++  if (wait(&xstatus, 0) != pid) {
+     printf("%s: wait failed!\n", s);
+   }
+   if (xstatus != 0) exit(xstatus);
+@@ -684,7 +684,7 @@ void pipe1(char *s) {
+       exit(1);
+     }
+     close(fds[0]);
+-    wait(&xstatus);
++    wait(&xstatus, 0);
+     exit(xstatus);
+   } else {
+     printf("%s: fork() failed\n", s);
+@@ -740,9 +740,9 @@ void preempt(char *s) {
+   kill(pid2);
+   kill(pid3);
+   printf("wait... ");
+-  wait(0);
+-  wait(0);
+-  wait(0);
++  wait(0, 0);
++  wait(0, 0);
++  wait(0, 0);
+ }
+ 
+ // try to find any races between exit and wait
+@@ -757,7 +757,7 @@ void exitwait(char *s) {
+     }
+     if (pid) {
+       int xstate;
+-      if (wait(&xstate) != pid) {
++      if (wait(&xstate, 0) != pid) {
+         printf("%s: wait wrong pid\n", s);
+         exit(1);
+       }
+@@ -783,7 +783,7 @@ void reparent(char *s) {
+       exit(1);
+     }
+     if (pid) {
+-      if (wait(0) != pid) {
++      if (wait(0, 0) != pid) {
+         printf("%s: wait wrong pid\n", s);
+         exit(1);
+       }
+@@ -818,8 +818,8 @@ void twochildren(char *s) {
+       if (pid2 == 0) {
+         exit(0);
+       } else {
+-        wait(0);
+-        wait(0);
++        wait(0, 0);
++        wait(0, 0);
+       }
+     }
+   }
+@@ -844,7 +844,7 @@ void forkfork(char *s) {
+         if (pid1 == 0) {
+           exit(0);
+         }
+-        wait(0);
++        wait(0, 0);
+       }
+       exit(0);
+     }
+@@ -852,7 +852,7 @@ void forkfork(char *s) {
+ 
+   int xstatus;
+   for (int i = 0; i < N; i++) {
+-    wait(&xstatus);
++    wait(&xstatus, 0);
+     if (xstatus != 0) {
+       printf("%s: fork in child failed", s);
+       exit(1);
+@@ -884,7 +884,7 @@ void forkforkfork(char *s) {
+ 
+   sleep(20);  // two seconds
+   close(open("stopforking", O_CREATE | O_RDWR));
+-  wait(0);
++  wait(0, 0);
+   sleep(10);  // one second
+ }
+ 
+@@ -905,7 +905,7 @@ void reparent2(char *s) {
+       fork();
+       exit(0);
+     }
+-    wait(0);
++    wait(0, 0);
+   }
+ 
+   exit(0);
+@@ -936,7 +936,7 @@ void mem(char *s) {
+     exit(0);
+   } else {
+     int xstatus;
+-    wait(&xstatus);
++    wait(&xstatus, 0);
+     if (xstatus == -1) {
+       // probably page fault, so might be lazy lab,
+       // so OK.
+@@ -973,7 +973,7 @@ void sharedfd(char *s) {
+     exit(0);
+   } else {
+     int xstatus;
+-    wait(&xstatus);
++    wait(&xstatus, 0);
+     if (xstatus != 0) exit(xstatus);
+   }
+ 
+@@ -1038,7 +1038,7 @@ void fourfiles(char *s) {
+ 
+   int xstatus;
+   for (pi = 0; pi < NCHILD; pi++) {
+-    wait(&xstatus);
++    wait(&xstatus, 0);
+     if (xstatus != 0) exit(xstatus);
+   }
+ 
+@@ -1102,7 +1102,7 @@ void createdelete(char *s) {
+ 
+   int xstatus;
+   for (pi = 0; pi < NCHILD; pi++) {
+-    wait(&xstatus);
++    wait(&xstatus, 0);
+     if (xstatus != 0) exit(1);
+   }
+ 
+@@ -1265,7 +1265,7 @@ void concreate(char *s) {
+       exit(0);
+     } else {
+       int xstatus;
+-      wait(&xstatus);
++      wait(&xstatus, 0);
+       if (xstatus != 0) exit(1);
+     }
+   }
+@@ -1321,7 +1321,7 @@ void concreate(char *s) {
+     if (pid == 0)
+       exit(0);
+     else
+-      wait(0);
++      wait(0, 0);
+   }
+ }
+ 
+@@ -1350,7 +1350,7 @@ void linkunlink(char *s) {
+   }
+ 
+   if (pid)
+-    wait(0);
++    wait(0, 0);
+   else
+     exit(0);
+ }
+@@ -1834,13 +1834,13 @@ void forktest(char *s) {
+   }
+ 
+   for (; n > 0; n--) {
+-    if (wait(0) < 0) {
++    if (wait(0, 0) < 0) {
+       printf("%s: wait stopped early\n", s);
+       exit(1);
+     }
+   }
+ 
+-  if (wait(0) != -1) {
++  if (wait(0, 0) != -1) {
+     printf("%s: wait got too many\n", s);
+     exit(1);
+   }
+@@ -1874,7 +1874,7 @@ void sbrkbasic(char *s) {
+     exit(1);
+   }
+ 
+-  wait(&xstatus);
++  wait(&xstatus, 0);
+   if (xstatus == 1) {
+     printf("%s: too much memory allocated!\n", s);
+     exit(1);
+@@ -1903,7 +1903,7 @@ void sbrkbasic(char *s) {
+     exit(1);
+   }
+   if (pid == 0) exit(0);
+-  wait(&xstatus);
++  wait(&xstatus, 0);
+   exit(xstatus);
+ }
+ 
+@@ -1980,7 +1980,7 @@ void kernmem(char *s) {
+       exit(1);
+     }
+     int xstatus;
+-    wait(&xstatus);
++    wait(&xstatus, 0);
+     if (xstatus != -1)  // did kernel kill child?
+       exit(1);
+   }
+@@ -2018,7 +2018,7 @@ void sbrkfail(char *s) {
+   for (i = 0; i < sizeof(pids) / sizeof(pids[0]); i++) {
+     if (pids[i] == -1) continue;
+     kill(pids[i]);
+-    wait(0);
++    wait(0, 0);
+   }
+   if (c == (char *)0xffffffffffffffffL) {
+     printf("%s: failed sbrk leaked memory\n", s);
+@@ -2046,7 +2046,7 @@ void sbrkfail(char *s) {
+     printf("%s: allocate a lot of memory succeeded %d\n", n);
+     exit(1);
+   }
+-  wait(&xstatus);
++  wait(&xstatus, 0);
+   if (xstatus != -1 && xstatus != 2) exit(1);
+ }
+ 
+@@ -2129,7 +2129,7 @@ void bigargtest(char *s) {
+     exit(1);
+   }
+ 
+-  wait(&xstatus);
++  wait(&xstatus, 0);
+   if (xstatus != 0) exit(xstatus);
+   fd = open("bigarg-ok", 0);
+   if (fd < 0) {
+@@ -2222,7 +2222,7 @@ void stacktest(char *s) {
+     printf("%s: fork failed\n", s);
+     exit(1);
+   }
+-  wait(&xstatus);
++  wait(&xstatus, 0);
+   if (xstatus == -1)  // kernel killed child?
+     exit(0);
+   else
+@@ -2260,7 +2260,7 @@ void sbrkbugs(char *s) {
+     // user page fault here.
+     exit(0);
+   }
+-  wait(0);
++  wait(0, 0);
+ 
+   pid = fork();
+   if (pid < 0) {
+@@ -2275,7 +2275,7 @@ void sbrkbugs(char *s) {
+     sbrk(-(sz - 3500));
+     exit(0);
+   }
+-  wait(0);
++  wait(0, 0);
+ 
+   pid = fork();
+   if (pid < 0) {
+@@ -2293,7 +2293,7 @@ void sbrkbugs(char *s) {
+ 
+     exit(0);
+   }
+-  wait(0);
++  wait(0, 0);
+ 
+   exit(0);
+ }
+@@ -2372,7 +2372,7 @@ void execout(char *s) {
+       exec("echo", args);
+       exit(0);
+     } else {
+-      wait((int *)0);
++      wait((int *)0, 0);
+     }
+   }
+ 
+@@ -2437,7 +2437,7 @@ int countfree() {
+   }
+ 
+   close(fds[0]);
+-  wait((int *)0);
++  wait((int *)0, 0);
+ 
+   return n;
+ }
+@@ -2457,7 +2457,7 @@ int run(void f(char *), char *s) {
+     f(s);
+     exit(0);
+   } else {
+-    wait(&xstatus);
++    wait(&xstatus, 0);
+     if (xstatus != 0)
+       printf("FAILED\n");
+     else
+diff --git a/user/usys.pl b/user/usys.pl
+index 01e426e..3a2f6c4 100644
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -36,3 +36,4 @@ entry("getpid");
+ entry("sbrk");
+ entry("sleep");
+ entry("uptime");
++entry("rename");
+diff --git a/user/waittest.c b/user/waittest.c
+new file mode 100644
+index 0000000..a193ca3
+--- /dev/null
++++ b/user/waittest.c
+@@ -0,0 +1,35 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++const int nonblock = 1;
++
++void waittest(void) {
++  printf("wait test\n");
++
++  int pid = fork();
++  if (pid == 0) {
++    // 这里睡眠足够长的时间，因此后面父进程进行非阻塞wait时该子进程一定还没有退出
++    sleep(10);
++    exit(0);
++  }
++
++  for (int i = 0; i < 3; i++) {
++    if (wait(0, nonblock) < 0) {
++      printf("no child exited yet, round %d\n", i);
++    } else {
++      printf("wait shouldn't block!\n");
++      printf("wait test FAIL\n");
++      exit(1);
++    }
++  }
++  int child_pid = wait(0, 0);
++  printf("child exited, pid %d\n", child_pid);
++
++  printf("wait test OK\n");
++}
++
++int main(int argc, char *argv[]) {
++  waittest();
++  exit(0);
++}
+\ No newline at end of file
+diff --git a/user/yieldtest.c b/user/yieldtest.c
+new file mode 100644
+index 0000000..d7e958c
+--- /dev/null
++++ b/user/yieldtest.c
+@@ -0,0 +1,29 @@
++#include "kernel/types.h"
++#include "kernel/stat.h"
++#include "user/user.h"
++
++void yieldtest(void) {
++  printf("yield test\n");
++
++  for (int i = 0; i < 3; i++) {
++    int pid = fork();
++    if (pid == 0) {
++      printf("Child with PID %d begins to run\n", getpid());
++      exit(0);
++    } else {
++    }
++  }
++  printf("parent yield\n");
++  // yield之后
++  // 在单核情况下，调度器应当调度到子进程
++  yield();
++  printf("parent yield finished\n");
++  for (int i = 0; i < 3; i++) {
++    wait(0, 0);
++  }
++}
++
++int main(int argc, char *argv[]) {
++  yieldtest();
++  exit(0);
++}
+\ No newline at end of file
