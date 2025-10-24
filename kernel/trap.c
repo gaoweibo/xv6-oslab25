@@ -55,6 +55,15 @@ void usertrap(void) {
     syscall();
   } else if ((which_dev = devintr()) != 0) {
     // ok
+    if (which_dev == 2) { // 时钟中断
+      // 在时钟中断中更新当前运行进程的时间
+      if (p != 0 && p->state == RUNNING) {
+        acquire(&p->lock);
+        // 简化的时间更新 - 每次时钟中断增加1个tick
+        p->running_ticks++;
+        release(&p->lock);
+      }
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

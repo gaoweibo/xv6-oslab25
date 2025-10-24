@@ -30,6 +30,10 @@ struct cpu {
   struct context context;     // swtch() here to enter scheduler().
   int noff;                   // Depth of push_off() nesting.
   int intena;                 // Were interrupts enabled before push_off()?
+  // CPU 统计相关字段
+  uint user_ticks;            // 用户态运行时间
+  uint last_switch_ticks;     // 上次切换时间
+  struct spinlock lock;
 };
 
 extern struct cpu cpus[NCPU];
@@ -110,6 +114,14 @@ struct proc {
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
 
-  // add more here if needed, 
-  // e.g. running time, ..., vruntime, nice ...
+  // 状态统计相关字段
+  uint state_start_ticks;      // 进入当前状态的时间戳
+  uint running_ticks;          // 累计RUNNING状态时间
+  uint runnable_ticks;         // 累计RUNNABLE状态时间  
+  uint sleeping_ticks;         // 累计SLEEPING状态时间
+  
+  // 优先级调度相关字段
+  int nice;                    // 进程nice值
+  uint vruntime;               // 虚拟运行时间
+  uint last_sched_ticks;       // 上次调度时间
 };

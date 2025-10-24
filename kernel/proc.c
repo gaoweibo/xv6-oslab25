@@ -27,6 +27,14 @@ void procinit(void) {
   struct proc *p;
 
   initlock(&pid_lock, "nextpid");
+
+  for(int i = 0; i < NCPU; i++) {
+    initlock(&cpus[i].lock, "cpu");
+    cpus[i].user_ticks = 0;
+    cpus[i].last_switch_ticks = 0;
+  }
+  
+
   for (p = proc; p < &proc[NPROC]; p++) {
     initlock(&p->lock, "proc");
 
@@ -97,6 +105,7 @@ static struct proc *allocproc(void) {
 
 found:
   p->pid = allocpid();
+  p->state = UNUSED;  // 保持为 UNUSED，后面会更新
 
   // Allocate a trapframe page.
   if ((p->trapframe = (struct trapframe *)kalloc()) == 0) {
@@ -118,6 +127,16 @@ found:
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
 
+  // 初始化新增字段
+  p->state_start_ticks = ticks;
+  p->running_ticks = 0;
+  p->runnable_ticks = 0;
+  p->sleeping_ticks = 0;
+  p->nice = 3;
+  p->vruntime = 0;
+  p->last_sched_ticks = 0;
+  update_state(p, RUNNABLE);
+
   return p;
 }
 
@@ -136,7 +155,7 @@ static void freeproc(struct proc *p) {
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
-  p->state = UNUSED;
+  update_state(p, UNUSED);
 }
 
 // Create a user page table for a given process,
@@ -201,7 +220,7 @@ void userinit(void) {
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
-  p->state = RUNNABLE;
+  update_state(p, RUNNABLE);
 
   release(&p->lock);
 }
@@ -261,7 +280,7 @@ int fork(void) {
 
   pid = np->pid;
 
-  np->state = RUNNABLE;
+  update_state(np, RUNNABLE);
 
   release(&np->lock);
 
@@ -346,7 +365,7 @@ void exit(int status) {
   wakeup1(original_parent);
 
   p->xstate = status;
-  p->state = ZOMBIE;
+  update_state(p, ZOMBIE);
 
   release(&original_parent->lock);
 
@@ -418,6 +437,8 @@ void scheduler(void) {
   struct cpu *c = mycpu();
 
   c->proc = 0;
+  c->last_switch_ticks = ticks; // 初始化CPU切换时间
+  
   for (;;) {
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
@@ -426,15 +447,21 @@ void scheduler(void) {
     for (p = proc; p < &proc[NPROC]; p++) {
       acquire(&p->lock);
       if (p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
+        // 记录调度开始时间
+        uint schedule_start = ticks;
+        
+        // Switch to chosen process.
+        update_state(p, RUNNING);
         c->proc = p;
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
-        // It should have changed its p->state before coming back.
+        // 更新CPU用户态时间
+        uint run_ticks = ticks - schedule_start;
+        acquire(&c->lock);
+        c->user_ticks += run_ticks;
+        release(&c->lock);
+        
         c->proc = 0;
 
         found = 1;
@@ -473,7 +500,7 @@ void sched(void) {
 void yield(void) {
   struct proc *p = myproc();
   acquire(&p->lock);
-  p->state = RUNNABLE;
+  update_state(p, RUNNABLE);
   sched();
   release(&p->lock);
 }
@@ -515,7 +542,7 @@ void sleep(void *chan, struct spinlock *lk) {
 
   // Go to sleep.
   p->chan = chan;
-  p->state = SLEEPING;
+  update_state(p, SLEEPING);
 
   sched();
 
@@ -537,7 +564,7 @@ void wakeup(void *chan) {
   for (p = proc; p < &proc[NPROC]; p++) {
     acquire(&p->lock);
     if (p->state == SLEEPING && p->chan == chan) {
-      p->state = RUNNABLE;
+      update_state(p, RUNNABLE);
     }
     release(&p->lock);
   }
@@ -548,7 +575,7 @@ void wakeup(void *chan) {
 static void wakeup1(struct proc *p) {
   if (!holding(&p->lock)) panic("wakeup1");
   if (p->chan == p && p->state == SLEEPING) {
-    p->state = RUNNABLE;
+    update_state(p, RUNNABLE);
   }
 }
 
@@ -564,7 +591,7 @@ int kill(int pid) {
       p->killed = 1;
       if (p->state == SLEEPING) {
         // Wake process from sleep().
-        p->state = RUNNABLE;
+        update_state(p, RUNNABLE);
       }
       release(&p->lock);
       return 0;
@@ -623,5 +650,21 @@ void procdump(void) {
 
 // you must hold p->lock to call this function
 void update_state(struct proc *p, enum procstate newstate) {
-  // TODO
+  uint current_ticks = ticks;
+  uint time_in_state = current_ticks - p->state_start_ticks;
+  switch(p->state) {
+    case RUNNING:
+      p->running_ticks += time_in_state;
+      break;
+    case RUNNABLE:
+      p->runnable_ticks += time_in_state;
+      break;
+    case SLEEPING:
+      p->sleeping_ticks += time_in_state;
+      break;
+    default:
+      break;
+  }
+  p->state = newstate;
+  p->state_start_ticks = current_ticks;
 }
