@@ -34,6 +34,7 @@ struct cpu {
   uint user_ticks;            // 用户态运行时间
   uint last_switch_ticks;     // 上次切换时间
   struct spinlock lock;
+  int id;                
 };
 
 extern struct cpu cpus[NCPU];
@@ -121,7 +122,11 @@ struct proc {
   uint sleeping_ticks;         // 累计SLEEPING状态时间
   
   // 优先级调度相关字段
-  int nice;                    // 进程nice值
-  uint vruntime;               // 虚拟运行时间
-  uint last_sched_ticks;       // 上次调度时间
+  int nice;                    // 进程优先级 (1-3)
+  uint64 vruntime;             // 虚拟运行时间
+  uint64 last_sched_ticks;     // 上次调度时间
+  int weight;                  // 进程权重
+
+  struct proc *rq_prev;  // 队列前驱
+  struct proc *rq_next;  // 队列后继
 };
