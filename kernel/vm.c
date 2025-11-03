@@ -379,3 +379,43 @@ int test_pagetable() {
   printf("test_pagetable: %d\n", satp != gsatp);
   return satp != gsatp;
 }
+
+void vmprint_level(pagetable_t pagetable, int level, uint64 base_va) {
+    for(int i = 0; i < 512; i++) {
+        pte_t pte = pagetable[i];
+        if(pte & PTE_V) {
+            uint64 child_pa = PTE2PA(pte);
+            if(level == 0) {
+                printf("||");
+            } else if(level == 1) {
+                printf("||   ||");
+            } else if(level == 2) {
+                printf("||   ||   ||");
+            }
+            uint64 va = base_va | ((uint64)i << (12 + 9 * (2 - level)));
+            if((pte & (PTE_R|PTE_W|PTE_X)) == 0) {
+                // 非叶子节点
+                printf("idx: %d: pa: %p, flags: ", i, child_pa);
+                printf((pte & PTE_R) ? "r" : "-");
+                printf((pte & PTE_W) ? "w" : "-");
+                printf((pte & PTE_X) ? "x" : "-");
+                printf((pte & PTE_U) ? "u" : "-");
+                printf("\n");
+                vmprint_level((pagetable_t)child_pa, level + 1, va);
+            } else {
+                // 叶子节点
+                printf("idx: %d: va: %p -> pa: %p, flags: ", i, va, child_pa);
+                printf((pte & PTE_R) ? "r" : "-");
+                printf((pte & PTE_W) ? "w" : "-");
+                printf((pte & PTE_X) ? "x" : "-");
+                printf((pte & PTE_U) ? "u" : "-");
+                printf("\n");
+            }
+        }
+    }
+}
+
+void vmprint(pagetable_t pagetable) {
+    printf("page table %p\n", pagetable);
+    vmprint_level(pagetable, 0, 0);
+}
