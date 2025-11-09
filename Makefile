@@ -327,7 +327,7 @@ format:
 
 
 diff:
-	git diff pgtbl-base HEAD > commit.patch
+	git diff origin/pgtbl HEAD > commit.patch
 
 WEBSUB := https://6828.scripts.mit.edu/2020/handin.py
 

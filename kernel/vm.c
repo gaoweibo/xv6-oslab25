@@ -15,6 +15,122 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[];  // trampoline.S
 
+void vmprint_level(pagetable_t pgtbl, int level, uint64 va_base);
+pte_t *walk(pagetable_t, uint64, int);
+
+int proc_mapuser(pagetable_t src, pagetable_t dst, uint64 oldsz, uint64 newsz) {
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+
+  if(newsz <= oldsz)
+    return 0;
+
+  for(i = PGROUNDUP(oldsz); i < newsz; i += PGSIZE){
+    if((pte = walk(src, i, 0)) == 0)
+      panic("proc_mapuser: pte should exist");
+    if((*pte & PTE_V) == 0)
+      panic("proc_mapuser: page not present");
+    
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte);
+    
+    // The kernel needs to access user memory, so clear the PTE_U flag.
+    flags &= ~PTE_U;
+
+    if(mappages(dst, i, PGSIZE, pa, flags) != 0){
+      // If mapping fails, we should unmap what we have already mapped.
+      // A more robust implementation would handle this. For now, we panic.
+      panic("proc_mapuser: mappages failed");
+    }
+  }
+  return 0;
+}
+
+void proc_freewalk(pagetable_t pagetable) {
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      uint64 child = PTE2PA(pte);
+      proc_freewalk((pagetable_t)child);
+      pagetable[i] = 0;
+    }
+  }
+  kfree((void*)pagetable);
+}
+
+void proc_kvmmap(pagetable_t kpagetable, uint64 va, uint64 pa, uint64 sz, int perm) {
+  if(mappages(kpagetable, va, sz, pa, perm) != 0)
+    panic("proc_kvmmap");
+}
+
+// Create a new kernel page table.
+// It contains direct mappings for kernel text, data, stack,
+// and peripherals, but not the CLINT.
+pagetable_t proc_kpagetable(void) {
+  pagetable_t kpagetable;
+
+  kpagetable = (pagetable_t) kalloc();
+  if(kpagetable == 0)
+    return 0;
+  memset(kpagetable, 0, PGSIZE);
+
+  // uart registers
+  proc_kvmmap(kpagetable, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+  // virtio mmio disk interface
+  proc_kvmmap(kpagetable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+  // PLIC
+  proc_kvmmap(kpagetable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+  // map kernel text executable and read-only.
+  proc_kvmmap(kpagetable, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+  // map kernel data and the physical RAM we'll make use of.
+  proc_kvmmap(kpagetable, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+  // map the trampoline for trap entry/exit.
+  proc_kvmmap(kpagetable, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+  return kpagetable;
+}
+
+void vmprint(pagetable_t pgtbl)
+{
+  printf("page table %p\n", pgtbl);
+  vmprint_level(pgtbl, 2, 0);
+}
+
+void vmprint_level(pagetable_t pgtbl, int level, uint64 va_base) {
+  // 遍历当前页表的512个页表项 (PTE)
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pgtbl[i];
+    if(pte & PTE_V){
+      for(int j = 0; j < (2 - level); j++){
+        printf("||   ");
+      }
+      uint64 current_va = va_base + ((uint64)i << (12 + 9 * level));
+
+      uint64 pa = PTE2PA(pte);
+
+      uint flags = PTE_FLAGS(pte);
+
+      printf("||idx: %d: ", i);
+
+      if((flags & (PTE_R | PTE_W | PTE_X)) != 0){
+        // 叶子节点
+        printf("va: %p -> pa: %p, flags: ", current_va, pa);
+        printf("%s", (flags & PTE_R) ? "r" : "-");
+        printf("%s", (flags & PTE_W) ? "w" : "-");
+        printf("%s", (flags & PTE_X) ? "x" : "-");
+        printf("%s", (flags & PTE_U) ? "u" : "-");
+        printf("\n");
+      } else {
+        printf("pa: %p, flags: ----\n", pa);
+        if(level > 0){
+          vmprint_level((pagetable_t)pa, level - 1, current_va);
+        }
+      }
+    }
+  }
+}
+
 /*
  * create a direct-map page table for the kernel.
  */
@@ -378,44 +494,4 @@ int test_pagetable() {
   uint64 gsatp = MAKE_SATP(kernel_pagetable);
   printf("test_pagetable: %d\n", satp != gsatp);
   return satp != gsatp;
-}
-
-void vmprint_level(pagetable_t pagetable, int level, uint64 base_va) {
-    for(int i = 0; i < 512; i++) {
-        pte_t pte = pagetable[i];
-        if(pte & PTE_V) {
-            uint64 child_pa = PTE2PA(pte);
-            if(level == 0) {
-                printf("||");
-            } else if(level == 1) {
-                printf("||   ||");
-            } else if(level == 2) {
-                printf("||   ||   ||");
-            }
-            uint64 va = base_va | ((uint64)i << (12 + 9 * (2 - level)));
-            if((pte & (PTE_R|PTE_W|PTE_X)) == 0) {
-                // 非叶子节点
-                printf("idx: %d: pa: %p, flags: ", i, child_pa);
-                printf((pte & PTE_R) ? "r" : "-");
-                printf((pte & PTE_W) ? "w" : "-");
-                printf((pte & PTE_X) ? "x" : "-");
-                printf((pte & PTE_U) ? "u" : "-");
-                printf("\n");
-                vmprint_level((pagetable_t)child_pa, level + 1, va);
-            } else {
-                // 叶子节点
-                printf("idx: %d: va: %p -> pa: %p, flags: ", i, va, child_pa);
-                printf((pte & PTE_R) ? "r" : "-");
-                printf((pte & PTE_W) ? "w" : "-");
-                printf((pte & PTE_X) ? "x" : "-");
-                printf((pte & PTE_U) ? "u" : "-");
-                printf("\n");
-            }
-        }
-    }
-}
-
-void vmprint(pagetable_t pagetable) {
-    printf("page table %p\n", pagetable);
-    vmprint_level(pagetable, 0, 0);
 }

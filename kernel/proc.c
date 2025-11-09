@@ -6,6 +6,8 @@
 #include "proc.h"
 #include "defs.h"
 
+extern pagetable_t kernel_pagetable;
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -28,6 +30,7 @@ void procinit(void) {
   initlock(&pid_lock, "nextpid");
   for (p = proc; p < &proc[NPROC]; p++) {
     initlock(&p->lock, "proc");
+    p->kstack = KSTACK((int) (p - proc));
 
     // Allocate a page for the process's kernel stack.
     // Map it high in memory, followed by an invalid
@@ -36,7 +39,9 @@ void procinit(void) {
     if (pa == 0) panic("kalloc");
     uint64 va = KSTACK((int)(p - proc));
     kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-    p->kstack = va;
+  p->kstack = va;
+  // save the physical address of the allocated kernel stack
+  p->kstack_pa = (uint64)pa;
   }
   kvminithart();
 }
@@ -111,6 +116,14 @@ found:
     return 0;
   }
 
+  p->k_pagetable = proc_kpagetable();
+  if(p->k_pagetable == 0) {
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+  proc_kvmmap(p->k_pagetable, p->kstack, p->kstack_pa, PGSIZE, PTE_R | PTE_W);
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -128,6 +141,11 @@ static void freeproc(struct proc *p) {
   p->trapframe = 0;
   if (p->pagetable) proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+
+  if(p->k_pagetable)
+    proc_freewalk(p->k_pagetable);
+  p->k_pagetable = 0;
+
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -193,6 +211,8 @@ void userinit(void) {
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
+  proc_mapuser(p->pagetable, p->k_pagetable, 0, PGSIZE);
+
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
   p->trapframe->sp = PGSIZE;  // user stack pointer
@@ -210,14 +230,21 @@ void userinit(void) {
 int growproc(int n) {
   uint sz;
   struct proc *p = myproc();
-
   sz = p->sz;
+  uint64 oldsz = sz;
   if (n > 0) {
+    if((sz + n) >= PLIC)
+      return -1;
     if ((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    proc_mapuser(p->pagetable, p->k_pagetable, sz - n, sz);
   } else if (n < 0) {
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    int npages_removed = (PGROUNDUP(oldsz) - PGROUNDUP(sz)) / PGSIZE;
+    if (npages_removed > 0) {
+      uvmunmap(p->k_pagetable, PGROUNDUP(sz), npages_removed, 0);
+    }
   }
   p->sz = sz;
   return 0;
@@ -242,6 +269,8 @@ int fork(void) {
     return -1;
   }
   np->sz = p->sz;
+
+  proc_mapuser(np->pagetable, np->k_pagetable, 0, np->sz);
 
   np->parent = p;
 
@@ -430,7 +459,14 @@ void scheduler(void) {
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        w_satp(MAKE_SATP(p->k_pagetable));
+        sfence_vma();
+
         swtch(&c->context, &p->context);
+
+        w_satp(MAKE_SATP(kernel_pagetable));
+        sfence_vma();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
@@ -596,7 +632,7 @@ int either_copyout(int user_dst, uint64 dst, void *src, uint64 len) {
 int either_copyin(void *dst, int user_src, uint64 src, uint64 len) {
   struct proc *p = myproc();
   if (user_src) {
-    return copyin(p->pagetable, dst, src, len);
+    return copyin_new(p->pagetable, dst, src, len);
   } else {
     memmove(dst, (char *)src, len);
     return 0;

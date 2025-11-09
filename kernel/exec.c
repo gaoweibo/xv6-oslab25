@@ -96,8 +96,16 @@ int exec(char *path, char **argv) {
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp;          // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
-  if(p->pid == 1)vmprint(p->pagetable);
-  return argc;  // this ends up in a0, the first argument to main(argc, argv)
+
+  if (oldsz > 0) {
+    uvmunmap(p->k_pagetable, 0, PGROUNDUP(oldsz) / PGSIZE, 0);
+  }
+  proc_mapuser(p->pagetable, p->k_pagetable, 0, sz);
+
+  if(p->pid==1)
+    vmprint(p->pagetable);
+  
+  return argc; 
 
 bad:
   if (pagetable) proc_freepagetable(pagetable, sz);

@@ -79,7 +79,7 @@ int pipewrite(struct pipe *pi, uint64 addr, int n) {
       wakeup(&pi->nread);
       sleep(&pi->nwrite, &pi->lock);
     }
-    if (copyin(pr->pagetable, &ch, addr + i, 1) == -1) break;
+    if (copyin_new(pr->pagetable, &ch, addr + i, 1) == -1) break;
     pi->data[pi->nwrite++ % PIPESIZE] = ch;
   }
   wakeup(&pi->nread);

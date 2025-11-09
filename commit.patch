@@ -1,0 +1,378 @@
+diff --git a/Makefile b/Makefile
+index 3598990..8527438 100644
+--- a/Makefile
++++ b/Makefile
+@@ -327,7 +327,7 @@ format:
+ 
+ 
+ diff:
+-	git diff pgtbl-base HEAD > commit.patch
++	git diff origin/pgtbl HEAD > commit.patch
+ 
+ WEBSUB := https://6828.scripts.mit.edu/2020/handin.py
+ 
+diff --git a/kernel/defs.h b/kernel/defs.h
+index f5bb692..acb7d67 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -164,6 +164,13 @@ void            uartputc_sync(int);
+ int             uartgetc(void);
+ 
+ // vm.c
++void            vmprint(pagetable_t);
++pagetable_t     proc_kpagetable(void);
++void            proc_kvmmap(pagetable_t, uint64, uint64, uint64, int);
++void            proc_freewalk(pagetable_t);
++int             proc_mapuser(pagetable_t, pagetable_t, uint64, uint64);
++int             copyin_new(pagetable_t, char *, uint64, uint64);
++int             copyinstr_new(pagetable_t, char *, uint64, uint64);
+ void            kvminit(void);
+ void            kvminithart(void);
+ uint64          kvmpa(uint64);
+diff --git a/kernel/exec.c b/kernel/exec.c
+index 7b8a524..761e860 100644
+--- a/kernel/exec.c
++++ b/kernel/exec.c
+@@ -97,6 +97,15 @@ int exec(char *path, char **argv) {
+   p->trapframe->sp = sp;          // initial stack pointer
+   proc_freepagetable(oldpagetable, oldsz);
+ 
++  // oldsz is in bytes; uvmunmap expects a page count. Convert to pages.
++  if (oldsz > 0) {
++    uvmunmap(p->k_pagetable, 0, PGROUNDUP(oldsz) / PGSIZE, 0);
++  }
++  proc_mapuser(p->pagetable, p->k_pagetable, 0, sz);
++
++  if(p->pid==1)
++    vmprint(p->pagetable);
++  
+   return argc;  // this ends up in a0, the first argument to main(argc, argv)
+ 
+ bad:
+diff --git a/kernel/pipe.c b/kernel/pipe.c
+index 8ba103c..8491048 100644
+--- a/kernel/pipe.c
++++ b/kernel/pipe.c
+@@ -79,7 +79,7 @@ int pipewrite(struct pipe *pi, uint64 addr, int n) {
+       wakeup(&pi->nread);
+       sleep(&pi->nwrite, &pi->lock);
+     }
+-    if (copyin(pr->pagetable, &ch, addr + i, 1) == -1) break;
++    if (copyin_new(pr->pagetable, &ch, addr + i, 1) == -1) break;
+     pi->data[pi->nwrite++ % PIPESIZE] = ch;
+   }
+   wakeup(&pi->nread);
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 6446119..0d30c4f 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -6,6 +6,8 @@
+ #include "proc.h"
+ #include "defs.h"
+ 
++extern pagetable_t kernel_pagetable;
++
+ struct cpu cpus[NCPU];
+ 
+ struct proc proc[NPROC];
+@@ -28,6 +30,8 @@ void procinit(void) {
+   initlock(&pid_lock, "nextpid");
+   for (p = proc; p < &proc[NPROC]; p++) {
+     initlock(&p->lock, "proc");
++    
++    p->kstack = KSTACK((int) (p - proc));
+ 
+     // Allocate a page for the process's kernel stack.
+     // Map it high in memory, followed by an invalid
+@@ -36,7 +40,9 @@ void procinit(void) {
+     if (pa == 0) panic("kalloc");
+     uint64 va = KSTACK((int)(p - proc));
+     kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+-    p->kstack = va;
++  p->kstack = va;
++  // save the physical address of the allocated kernel stack
++  p->kstack_pa = (uint64)pa;
+   }
+   kvminithart();
+ }
+@@ -111,6 +117,16 @@ found:
+     return 0;
+   }
+ 
++  // Create a per-process kernel page table.
++  p->k_pagetable = proc_kpagetable();
++  if(p->k_pagetable == 0) {
++    freeproc(p);
++    release(&p->lock);
++    return 0;
++  }
++  // Map its kernel stack.
++  proc_kvmmap(p->k_pagetable, p->kstack, p->kstack_pa, PGSIZE, PTE_R | PTE_W);
++
+   // Set up new context to start executing at forkret,
+   // which returns to user space.
+   memset(&p->context, 0, sizeof(p->context));
+@@ -128,6 +144,11 @@ static void freeproc(struct proc *p) {
+   p->trapframe = 0;
+   if (p->pagetable) proc_freepagetable(p->pagetable, p->sz);
+   p->pagetable = 0;
++
++  if(p->k_pagetable)
++    proc_freewalk(p->k_pagetable);
++  p->k_pagetable = 0;
++
+   p->sz = 0;
+   p->pid = 0;
+   p->parent = 0;
+@@ -193,6 +214,8 @@ void userinit(void) {
+   uvminit(p->pagetable, initcode, sizeof(initcode));
+   p->sz = PGSIZE;
+ 
++  proc_mapuser(p->pagetable, p->k_pagetable, 0, PGSIZE);
++
+   // prepare for the very first "return" from kernel to user.
+   p->trapframe->epc = 0;      // user program counter
+   p->trapframe->sp = PGSIZE;  // user stack pointer
+@@ -210,14 +233,27 @@ void userinit(void) {
+ int growproc(int n) {
+   uint sz;
+   struct proc *p = myproc();
+-
+   sz = p->sz;
++  uint64 oldsz = sz;
+   if (n > 0) {
++    // 添加PLIC地址检查
++    if((sz + n) >= PLIC)
++      return -1;
+     if ((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
+       return -1;
+     }
++    proc_mapuser(p->pagetable, p->k_pagetable, sz - n, sz);
+   } else if (n < 0) {
++    // remember old size to compute how many pages were removed
+     sz = uvmdealloc(p->pagetable, sz, sz + n);
++    // 同步解除内核页表的映射
++    // uvmunmap expects a page count, so compute the number of pages removed.
++    int npages_removed = (PGROUNDUP(oldsz) - PGROUNDUP(sz)) / PGSIZE;
++    if (npages_removed > 0) {
++      // uvmunmap requires va to be page-aligned. Use PGROUNDUP(sz) as the
++      // starting virtual address of the unmapped region.
++      uvmunmap(p->k_pagetable, PGROUNDUP(sz), npages_removed, 0);
++    }
+   }
+   p->sz = sz;
+   return 0;
+@@ -243,6 +279,8 @@ int fork(void) {
+   }
+   np->sz = p->sz;
+ 
++  proc_mapuser(np->pagetable, np->k_pagetable, 0, np->sz);
++
+   np->parent = p;
+ 
+   // copy saved user registers.
+@@ -430,8 +468,17 @@ void scheduler(void) {
+         // before jumping back to us.
+         p->state = RUNNING;
+         c->proc = p;
++
++        // 加载进程的内核页表
++        w_satp(MAKE_SATP(p->k_pagetable));
++        sfence_vma();
++
+         swtch(&c->context, &p->context);
+ 
++        // 添加下面两行，恢复全局内核页表
++        w_satp(MAKE_SATP(kernel_pagetable));
++        sfence_vma();
++
+         // Process is done running for now.
+         // It should have changed its p->state before coming back.
+         c->proc = 0;
+@@ -596,7 +643,7 @@ int either_copyout(int user_dst, uint64 dst, void *src, uint64 len) {
+ int either_copyin(void *dst, int user_src, uint64 src, uint64 len) {
+   struct proc *p = myproc();
+   if (user_src) {
+-    return copyin(p->pagetable, dst, src, len);
++    return copyin_new(p->pagetable, dst, src, len);
+   } else {
+     memmove(dst, (char *)src, len);
+     return 0;
+diff --git a/kernel/proc.h b/kernel/proc.h
+index 70f9a65..d3e5d18 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -109,4 +109,7 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
++
++  pagetable_t k_pagetable;     // Per-process kernel page table
++  uint64 kstack_pa;            // Physical address of kernel stack
+ };
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index efbc6de..289a3f8 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -11,7 +11,7 @@
+ int fetchaddr(uint64 addr, uint64 *ip) {
+   struct proc *p = myproc();
+   if (addr >= p->sz || addr + sizeof(uint64) > p->sz) return -1;
+-  if (copyin(p->pagetable, (char *)ip, addr, sizeof(*ip)) != 0) return -1;
++  if (copyin_new(p->pagetable, (char *)ip, addr, sizeof(*ip)) != 0) return -1;
+   return 0;
+ }
+ 
+@@ -19,7 +19,7 @@ int fetchaddr(uint64 addr, uint64 *ip) {
+ // Returns length of string, not including nul, or -1 for error.
+ int fetchstr(uint64 addr, char *buf, int max) {
+   struct proc *p = myproc();
+-  int err = copyinstr(p->pagetable, buf, addr, max);
++  int err = copyinstr_new(p->pagetable, buf, addr, max);
+   if (err < 0) return err;
+   return strlen(buf);
+ }
+diff --git a/kernel/vm.c b/kernel/vm.c
+index b794885..f0f51f2 100644
+--- a/kernel/vm.c
++++ b/kernel/vm.c
+@@ -15,6 +15,139 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
+ 
+ extern char trampoline[];  // trampoline.S
+ 
++void vmprint_recursive(pagetable_t pgtbl, int level, uint64 va_base);
++pte_t *walk(pagetable_t, uint64, int);
++
++int proc_mapuser(pagetable_t src, pagetable_t dst, uint64 oldsz, uint64 newsz) {
++  pte_t *pte;
++  uint64 pa, i;
++  uint flags;
++
++  if(newsz <= oldsz)
++    return 0;
++
++  for(i = PGROUNDUP(oldsz); i < newsz; i += PGSIZE){
++    if((pte = walk(src, i, 0)) == 0)
++      panic("proc_mapuser: pte should exist");
++    if((*pte & PTE_V) == 0)
++      panic("proc_mapuser: page not present");
++    
++    pa = PTE2PA(*pte);
++    flags = PTE_FLAGS(*pte);
++    
++    // The kernel needs to access user memory, so clear the PTE_U flag.
++    flags &= ~PTE_U;
++
++    if(mappages(dst, i, PGSIZE, pa, flags) != 0){
++      // If mapping fails, we should unmap what we have already mapped.
++      // A more robust implementation would handle this. For now, we panic.
++      panic("proc_mapuser: mappages failed");
++    }
++  }
++  return 0;
++}
++
++void proc_freewalk(pagetable_t pagetable) {
++  // there are 2^9 = 512 PTEs in a page table.
++  for(int i = 0; i < 512; i++){
++    pte_t pte = pagetable[i];
++    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
++      // this PTE points to a lower-level page table.
++      uint64 child = PTE2PA(pte);
++      proc_freewalk((pagetable_t)child);
++      pagetable[i] = 0;
++    }
++    // 我们不关心叶子节点，因为它们指向的物理页是共享的，不能被释放
++  }
++  kfree((void*)pagetable);
++}
++
++void proc_kvmmap(pagetable_t kpagetable, uint64 va, uint64 pa, uint64 sz, int perm) {
++  if(mappages(kpagetable, va, sz, pa, perm) != 0)
++    panic("proc_kvmmap");
++}
++
++// Create a new kernel page table.
++// It contains direct mappings for kernel text, data, stack,
++// and peripherals, but not the CLINT.
++pagetable_t proc_kpagetable(void) {
++  pagetable_t kpagetable;
++
++  kpagetable = (pagetable_t) kalloc();
++  if(kpagetable == 0)
++    return 0;
++  memset(kpagetable, 0, PGSIZE);
++
++  // uart registers
++  proc_kvmmap(kpagetable, UART0, UART0, PGSIZE, PTE_R | PTE_W);
++  // virtio mmio disk interface
++  proc_kvmmap(kpagetable, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
++  // PLIC
++  proc_kvmmap(kpagetable, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
++  // map kernel text executable and read-only.
++  proc_kvmmap(kpagetable, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
++  // map kernel data and the physical RAM we'll make use of.
++  proc_kvmmap(kpagetable, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
++  // map the trampoline for trap entry/exit.
++  proc_kvmmap(kpagetable, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
++
++  return kpagetable;
++}
++
++void vmprint(pagetable_t pgtbl)
++{
++  printf("page table %p\n", pgtbl);
++  // 从最高级（第2级）页表开始遍历
++  vmprint_recursive(pgtbl, 2, 0);
++}
++
++void vmprint_recursive(pagetable_t pgtbl, int level, uint64 va_base) {
++  // 遍历当前页表的512个页表项 (PTE)
++  for(int i = 0; i < 512; i++){
++    pte_t pte = pgtbl[i];
++
++    // 检查PTE_V位，只打印有效的页表项
++    if(pte & PTE_V){
++      // 打印层级缩进
++      for(int j = 0; j < (2 - level); j++){
++        printf("||   ");
++      }
++
++      // 计算当前PTE对应的虚拟地址
++      // 每一级的索引都占9位
++      uint64 current_va = va_base + ((uint64)i << (12 + 9 * level));
++
++      // 提取物理地址
++      uint64 pa = PTE2PA(pte);
++
++      // 提取权限位
++      uint flags = PTE_FLAGS(pte);
++
++      printf("||idx: %d: ", i);
++
++      // 判断PTE是叶子节点还是非叶子节点
++      // 如果R, W, X位中有一个为1，说明是映射到物理页的叶子节点
++      if((flags & (PTE_R | PTE_W | PTE_X)) != 0){
++        // 叶子节点
++        printf("va: %p -> pa: %p, flags: ", current_va, pa);
++        printf("%s", (flags & PTE_R) ? "r" : "-");
++        printf("%s", (flags & PTE_W) ? "w" : "-");
++        printf("%s", (flags & PTE_X) ? "x" : "-");
++        printf("%s", (flags & PTE_U) ? "u" : "-");
++        printf("\n");
++      } else {
++        // 非叶子节点，它指向下一级页表
++        printf("pa: %p, flags: ----\n", pa);
++
++        // 检查是否还有下一级，RISC-V Sv39是三级页表 (level 2, 1, 0)
++        if(level > 0){
++          vmprint_recursive((pagetable_t)pa, level - 1, current_va);
++        }
++      }
++    }
++  }
++}
++
+ /*
+  * create a direct-map page table for the kernel.
+  */

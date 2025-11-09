@@ -109,4 +109,7 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  pagetable_t k_pagetable;     // Per-process kernel page table
+  uint64 kstack_pa;            // Physical address of kernel stack
 };
