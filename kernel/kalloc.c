@@ -33,9 +33,7 @@ void kinit(){
   freerange(end, (void*)PHYSTOP);
 }
 
-void
-freerange(void *pa_start, void *pa_end)
-{
+void freerange(void *pa_start, void *pa_end){
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
   int current_cpu = 0;
@@ -69,8 +67,7 @@ void kfree(void *pa){
 // Allocate one 4096-byte page of physical memory.
 // Returns a pointer that the kernel can use.
 // Returns 0 if the memory cannot be allocated.
-void *kalloc(void)
-{
+void *kalloc(void){
   struct run *r;
   push_off();
   int id = cpuid();

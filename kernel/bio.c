@@ -35,15 +35,11 @@ struct {
   struct buf bucket[NBUCKET];
 } bcache;
 
-// 哈希函数
-int
-hash(uint blockno) {
+int hash(uint blockno) {
   return blockno % NBUCKET;
 }
 
-void
-binit(void)
-{
+void binit(void){
   // 初始化所有桶的锁
   for (int i = 0; i < NBUCKET; i++) {
     char lockname[16];
@@ -53,7 +49,6 @@ binit(void)
     bcache.bucket[i].prev = &bcache.bucket[i];
     bcache.bucket[i].next = &bcache.bucket[i];
   }
-  
   // 将所有buf分配到哈希桶中
   for (int i = 0; i < NBUF; i++) {
     struct buf *b = &bcache.buf[i];
@@ -78,10 +73,7 @@ bget(uint dev, uint blockno)
 {
   struct buf *b;
   int bucket_id = hash(blockno);
-  
   acquire(&bcache.lock[bucket_id]);
-  
-  // 在对应桶中查找是否已缓存
   for(b = bcache.bucket[bucket_id].next; b != &bcache.bucket[bucket_id]; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
@@ -90,7 +82,6 @@ bget(uint dev, uint blockno)
       return b;
     }
   }
-  
   // 未找到，需要在当前桶中寻找可替换的块
   // 首先在当前桶中寻找引用计数为0的块
   for(b = bcache.bucket[bucket_id].next; b != &bcache.bucket[bucket_id]; b = b->next){
@@ -147,9 +138,7 @@ bget(uint dev, uint blockno)
 }
 
 // Return a locked buf with the contents of the indicated block.
-struct buf*
-bread(uint dev, uint blockno)
-{
+struct buf* bread(uint dev, uint blockno){
   struct buf *b;
 
   b = bget(dev, blockno);
@@ -161,18 +150,14 @@ bread(uint dev, uint blockno)
 }
 
 // Write b's contents to disk.  Must be locked.
-void
-bwrite(struct buf *b)
-{
+void bwrite(struct buf *b){
   if(!holdingsleep(&b->lock))
     panic("bwrite");
   virtio_disk_rw(b, 1);
 }
 
 // Release a locked buffer.
-void
-brelse(struct buf *b)
-{
+void brelse(struct buf *b){
   if(!holdingsleep(&b->lock))
     panic("brelse");
 
@@ -183,21 +168,18 @@ brelse(struct buf *b)
   acquire(&bcache.lock[bucket_id]);
   b->refcnt--;
   if (b->refcnt == 0) {
-    // 不需要移动，保持在同一桶中
   }
   release(&bcache.lock[bucket_id]);
 }
 
-void
-bpin(struct buf *b) {
+void bpin(struct buf *b) {
   int bucket_id = hash(b->blockno);
   acquire(&bcache.lock[bucket_id]);
   b->refcnt++;
   release(&bcache.lock[bucket_id]);
 }
 
-void
-bunpin(struct buf *b) {
+void bunpin(struct buf *b) {
   int bucket_id = hash(b->blockno);
   acquire(&bcache.lock[bucket_id]);
   b->refcnt--;
