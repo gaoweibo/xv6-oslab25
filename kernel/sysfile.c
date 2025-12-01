@@ -304,11 +304,53 @@ sys_open(void)
       return -1;
     }
   } else {
-    if((ip = namei(path)) == 0){
-      end_op();
-      return -1;
+    // 处理符号链接的递归跟随
+    int depth = 0;
+    char current_path[MAXPATH];
+    char link_target[MAXPATH];
+    
+    // 复制初始路径
+    safestrcpy(current_path, path, MAXPATH);
+    
+    while(1) {
+      // 查找inode
+      if((ip = namei(current_path)) == 0){
+        end_op();
+        return -1;
+      }
+      
+      ilock(ip);
+      
+      // 如果是符号链接且没有O_NOFOLLOW标志，则跟随
+      if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)) {
+        // 检查循环：如果深度超过10，则返回错误
+        if(++depth > 10) {
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+        
+        // 从符号链接读取目标路径
+        memset(link_target, 0, MAXPATH);
+        if(readi(ip, 0, (uint64)link_target, 0, MAXPATH) < 0) {
+          iunlockput(ip);
+          end_op();
+          return -1;
+        }
+        
+        // 释放当前符号链接的inode
+        iunlockput(ip);
+        
+        // 使用目标路径继续查找
+        safestrcpy(current_path, link_target, MAXPATH);
+        continue; // 继续循环，处理新的路径
+      }
+      
+      // 如果不是符号链接，或者有O_NOFOLLOW标志，则跳出循环
+      break;
     }
-    ilock(ip);
+    
+    // 检查目录权限
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
@@ -316,12 +358,14 @@ sys_open(void)
     }
   }
 
+  // 设备文件检查（保持不变）
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
     iunlockput(ip);
     end_op();
     return -1;
   }
 
+  // 分配文件描述符（保持不变）
   if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
@@ -330,6 +374,7 @@ sys_open(void)
     return -1;
   }
 
+  // 设置文件结构（保持不变）
   if(ip->type == T_DEVICE){
     f->type = FD_DEVICE;
     f->major = ip->major;
@@ -341,6 +386,7 @@ sys_open(void)
   f->readable = !(omode & O_WRONLY);
   f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
 
+  // 处理截断（保持不变）
   if((omode & O_TRUNC) && ip->type == T_FILE){
     itrunc(ip);
   }
@@ -484,3 +530,36 @@ sys_pipe(void)
   }
   return 0;
 }
+// 在 kernel/sysfile.c 中实现 sys_symlink 系统调用
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+  
+  // 获取参数：注意这个版本的 argstr 需要3个参数
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+  
+  begin_op();
+  
+  // 创建符号链接 inode
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+  
+  // 将目标路径写入 inode 的数据块
+  // 注意：writei 需要5个参数：inode, user_src, src, offset, n
+  if(writei(ip, 0, (uint64)target, 0, strlen(target)) != strlen(target)){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  
+  iunlockput(ip);
+  end_op();
+  return 0;
+}
+
